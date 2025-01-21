@@ -1,0 +1,422 @@
+<!--
+  Rui Santos
+  Complete project details at https://RandomNerdTutorials.com/esp32-web-bluetooth/
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files.
+  The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Super Audio Kart</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/png" href="" />
+    <link rel="stylesheet" type="text/css" href="style.css" />
+    <script src="https://unpkg.com/compromise@14.14.3/builds/compromise.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.4.6/dist/fuse.min.js"></script>
+  </head>
+  <body>
+    <div class="central-container" id="mainContainer">
+      <button id="BleButton" class="OnButton">Start</button>
+    </div>
+    <div class="countdown hidden" id="countdownDisplay"></div>
+    <script type="module">
+      // DOM Elements
+      const mainContainer = document.getElementById("mainContainer");
+      const BleButton = document.getElementById("BleButton");
+
+      //Define BLE Device Specs (from arduino code)
+      var deviceNameL = "ESP32 - Luigi";
+      var bleService = "19b10000-e8f2-537e-4f6c-d104768a1214";
+      var EngineCharacteristic = "19b10002-e8f2-537e-4f6c-d104768a1214";
+      var sensorCharacteristic = "19b10001-e8f2-537e-4f6c-d104768a1214";
+
+      // global vars
+      var bleServer;
+      var bleServiceFound;
+      var sensorCharacteristicFound;
+
+      // Check for browser compatibility
+      const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
+
+      if (!SpeechRecognition) {
+        alert(
+          "Speech Recognition is not supported in this browser. Please use a modern browser like Chrome."
+        );
+      } else {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+
+        // starts interpreting the speech
+        // it currently writes the text
+        // and then processes it through NLP
+        recognition.onresult = (event) => {
+          let transcript = "";
+          for (let i = 0; i < event.results.length; i++) {
+            transcript = event.results[i][0].transcript;
+          }
+          parseCommand(transcript);
+        };
+
+        recognition.onend = () => {
+          Stop();
+        };
+
+        // Connect/Disconnect Button
+        BleButton.addEventListener("click", async () => {
+          if (BleButton.classList.contains("OnButton")) {
+            if (isWebBluetoothEnabled()) {
+              try {
+                // Wait for the device to be connected before starting recognition
+                await connectToDevice();
+                StartRecog(); // Call StartRecog only after connectToDevice finishes
+                BleButton.classList.remove("OnButton");
+                BleButton.classList.add("OffButton");
+                BleButton.textContent = "Finish";
+              } catch (error) {
+                console.error("Error connecting to device:", error);
+              }
+            }
+          } else if (BleButton.classList.contains("OffButton")) {
+            disconnectDevice();
+            recognition.stop();
+            var music = new Audio("mariofinish.mp3");
+            music.play();
+          }
+        });
+
+        // Check if BLE is available in your Browser
+        function isWebBluetoothEnabled() {
+          if (!navigator.bluetooth) {
+            console.log("Web Bluetooth API is not available in this browser!");
+            return false;
+          }
+          console.log("Web Bluetooth API supported in this browser.");
+          return true;
+        }
+
+        // Connect to BLE Device and Enable Notifications
+        function connectToDevice() {
+          return new Promise((resolve, reject) => {
+            console.log("Initializing Bluetooth...");
+            navigator.bluetooth
+              .requestDevice({
+                filters: [{ name: deviceNameL }],
+                optionalServices: [bleService],
+              })
+              .then((device) => {
+                console.log("Device Selected:", device.name);
+                device.addEventListener(
+                  "gattservicedisconnected",
+                  onDisconnected
+                );
+                return device.gatt.connect();
+              })
+              .then((gattServer) => {
+                bleServer = gattServer;
+                console.log("Connected to GATT Server");
+                return bleServer.getPrimaryService(bleService);
+              })
+              .then((service) => {
+                bleServiceFound = service;
+                console.log("Service discovered:", service.uuid);
+                return service.getCharacteristic(sensorCharacteristic);
+              })
+              .then((characteristic) => {
+                console.log("Characteristic discovered:", characteristic.uuid);
+                sensorCharacteristicFound = characteristic;
+                characteristic.addEventListener(
+                  "characteristicvaluechanged",
+                  handleCharacteristicChange
+                );
+                characteristic.startNotifications();
+                console.log("Notifications Started.");
+                return characteristic.readValue();
+              })
+              .then(() => {
+                resolve(); // Resolve the promise when all steps complete
+              })
+              .catch((error) => {
+                console.log("Error: ", error);
+                reject(error); // Reject the promise if there is an error
+              });
+          });
+        }
+
+        function onDisconnected(event) {
+          console.log("Device Disconnected:", event.target.device.name);
+
+          connectToDevice();
+        }
+
+        function handleCharacteristicChange(event) {
+          const newValueReceived = new TextDecoder().decode(event.target.value);
+          console.log("Characteristic value changed: ", newValueReceived);
+        }
+
+        function writeOnCharacteristic(value) {
+          if (bleServer && bleServer.connected) {
+            bleServiceFound
+              .getCharacteristic(EngineCharacteristic)
+              .then((characteristic) => {
+                console.log(
+                  "Found the Engine characteristic: ",
+                  characteristic.uuid
+                );
+                const data = new Uint8Array([value]);
+                return characteristic.writeValue(data);
+              })
+              .catch((error) => {
+                console.error(
+                  "Error writing to the Engine characteristic: ",
+                  error
+                );
+              });
+          } else {
+            console.error(
+              "Bluetooth is not connected. Cannot write to characteristic."
+            );
+            window.alert(
+              "Bluetooth is not connected. Cannot write to characteristic. \n Connect to BLE first!"
+            );
+          }
+        }
+
+        function disconnectDevice() {
+          console.log("Disconnect Device.");
+          if (bleServer && bleServer.connected) {
+            if (sensorCharacteristicFound) {
+              sensorCharacteristicFound
+                .stopNotifications()
+                .then(() => {
+                  console.log("Notifications Stopped");
+                  return bleServer.disconnect();
+                })
+                .then(() => {
+                  console.log("Device Disconnected");
+                  BleButton.classList.remove("OffButton");
+                  BleButton.classList.add("OnButton");
+                  BleButton.textContent = "Start";
+                })
+                .catch((error) => {
+                  console.log("An error occurred:", error);
+                });
+            } else {
+              console.log("No characteristic found to disconnect.");
+            }
+          } else {
+            // Throw an error if Bluetooth is not connected
+            console.error("Bluetooth is not connected.");
+            window.alert("Bluetooth is not connected.");
+          }
+        }
+
+        function StartRecog() {
+          // Countdown logic
+          let countdown = 3;
+          const countdownDisplay = document.getElementById("countdownDisplay"); // Assuming you have an element to show the countdown
+
+          // Display countdown
+          countdownDisplay.classList.remove("hidden");
+          mainContainer.classList.add("hidden");
+          const countdownInterval = setInterval(() => {
+            countdownDisplay.innerHTML = `<img src="${countdown}.png" alt="${countdown}">`; // Update display
+            countdown--;
+
+            if (countdown < 0) {
+              clearInterval(countdownInterval);
+              countdownDisplay.innerHTML = `<img src="start.png" alt="Start">`; // Show 'Start' after countdown
+              recognition.start(); // Start recognition after countdown
+            }
+          }, 1000); // Update every second
+          // Trigger action after 1 second of showing 'Start'
+          setTimeout(() => {
+            countdownDisplay.classList.add("hidden");
+            mainContainer.classList.remove("hidden");
+            countdownDisplay.innerHTML = "";
+          }, 5000); // 1 second delay
+          var music = new Audio("mariostart.mp3");
+          music.play();
+        }
+        // Function to parse the command
+        function parseCommand(command) {
+          const possibleActions = [
+            "go",
+            "move",
+            "drive",
+            "turn",
+            "accelerate",
+            "stop",
+            "brake",
+            "fuck",
+          ];
+
+          const possibleDirections = [
+            "forward",
+            "backward",
+            "left",
+            "right",
+            "straight",
+            "ahead",
+            "reverse",
+          ];
+
+          // Initialize Fuse.js for fuzzy matching
+          const fuseActions = new Fuse(possibleActions, { threshold: 0.4 });
+          const fuseDirections = new Fuse(possibleDirections, {
+            threshold: 0.4,
+          });
+
+          // Get the command text
+          const doc = nlp(command);
+
+          // Extract actions (with fuzzy matching)
+          const rawActions = doc
+            .match("(go|move|turn|stop|drive|accelerate|fuck|bad)")
+            .out("array");
+          const actions = rawActions.length
+            ? rawActions.map((action) => {
+                const result = fuseActions.search(action);
+                return result.length > 0 ? result[0].item : null;
+              })
+            : [null];
+
+          // Extract direction (with fuzzy matching)
+          const rawDirections = doc
+            .match(
+              "(forward|backward|left|right|straight|ahead|back|reverse|forwards|backwards)"
+            )
+            .out("array");
+          const directions = rawDirections.length
+            ? rawDirections.map((direction) => {
+                const result = fuseDirections.search(direction);
+                return result.length > 0 ? result[0].item : "forward";
+              })
+            : [null]; // Default to "forward" if no direction is found
+
+          // Extract duration using a regex and log the match
+          const rawDurationMatch = command.match(
+            /(\d+)\s*(seconds?|minutes?|indefinite|forever|for a while)/
+          );
+          let durationInSeconds = 0;
+
+          if (rawDurationMatch) {
+            const num = parseInt(rawDurationMatch[1], 10);
+            const unit = rawDurationMatch[2].toLowerCase();
+
+            if (unit.includes("minute")) {
+              durationInSeconds = num * 60; // Convert minutes to seconds
+            } else if (unit.includes("second")) {
+              durationInSeconds = num; // Already in seconds
+            } else if (
+              unit === "indefinite" ||
+              unit === "forever" ||
+              unit === "for a while"
+            ) {
+              durationInSeconds = -1; // Represent indefinite as -1
+            }
+          } else {
+            durationInSeconds = -1; // If no duration specified, default to indefinite
+          }
+
+          // Handle single action: Combine action, direction, and duration
+          const parsedcommand = {
+            action: actions[0], // Use the first action found
+            direction: directions[0], // Use the first direction found
+            duration: durationInSeconds,
+          };
+
+          // Check if connected to bluetooth
+          if (BleButton.classList.contains("OffButton")) {
+            // take the parsed command and then send the signals
+            sendSignal(parsedcommand);
+          }
+        }
+        // debounce mechanism
+        let lastCommandTime = 0;
+
+        // this function takes the command and then executes various functions depending on what is wanted
+        function sendSignal(parsedcommand) {
+          const now = Date.now(); // Get the current timestamp
+
+          // unpack the command
+          const { action, direction, duration } = parsedcommand;
+          // list of possible commands
+          const starts = ["go", "move", "drive", "accelerate"];
+          const stops = ["stop", "brake", "bad"];
+          const forwards = ["forward", "straight", "ahead", "forwards"];
+          const backwards = ["reverse", "backward", "back", "backwards"];
+
+          // execute the commands
+          if (action !== null || direction !== null) {
+            console.log(parsedcommand);
+            if (now - lastCommandTime > 1000) {
+              console.log(now);
+              lastCommandTime = now;
+              if (starts.includes(action)) {
+                if (forwards.includes(direction)) {
+                  Forward(duration);
+                } else if (backwards.includes(direction)) {
+                  Backward(duration);
+                } else if (direction == "left") {
+                  Left(duration);
+                } else if (direction == "right") {
+                  Right(duration);
+                } else {
+                  Forward(duration);
+                }
+              } else if (action == "turn") {
+                if (direction == "left") {
+                  Left(duration);
+                } else if (direction == "right") {
+                  Right(duration);
+                }
+              } else if (stops.includes(action)) {
+                Stop(duration);
+              } else if (direction == "left") {
+                Left(duration);
+              } else if (direction == "right") {
+                Right(duration);
+              } else if (forwards.includes(direction)) {
+                Forward(duration);
+              } else if (backwards.includes(direction)) {
+                Backward(duration);
+              } else if (action == "fuck") {
+                Fuck(duration);
+              }
+            }
+          }
+        }
+        // these functions currently just write to the console but can be where
+        // we send the commands to the car
+        function Forward(duration) {
+          console.log("Forward for " + duration + " seconds");
+          writeOnCharacteristic(1);
+        }
+        function Backward(duration) {
+          console.log("Backward for " + duration + " seconds");
+          writeOnCharacteristic(2);
+        }
+        function Right(duration) {
+          console.log("Right for " + duration + " seconds");
+          writeOnCharacteristic(3);
+        }
+        function Left(duration) {
+          console.log("Left for " + duration + " seconds");
+          writeOnCharacteristic(4);
+        }
+        function Stop(duration) {
+          console.log("Stop for " + duration + " seconds");
+          writeOnCharacteristic(0);
+        }
+        function Fuck(duration) {
+          console.log("Fuck");
+          writeOnCharacteristic(5);
+        }
+      }
+    </script>
+  </body>
+</html>
